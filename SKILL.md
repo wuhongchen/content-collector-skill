@@ -68,8 +68,28 @@ Detect Link → Fetch Content → Create Feishu Doc → Update Table
 
 **权限说明：**
 - 任何用户均可触发收录（无需管理员权限）
-- 收录的文档统一存储到麻小知识库（04-内容素材目录）
+- 收录的文档统一存储到指定的知识库目录
 - 所有用户均可查看已收录的文档
+
+---
+
+## Installation & Permission Check (安装与权限检查)
+
+在正式使用本技能前，系统必须自动或引导用户完成以下权限校验，以确保流程不中断：
+
+### 1. 飞书权限清单
+| 权限项 | 验证工具 | 目的 |
+|-------|---------|------|
+| **OAuth 授权** | `feishu_oauth` | 获取操作飞书文档和表格的用户凭证 |
+| **知识库写入权限** | `feishu_create_doc` | 确保能在指定的 Space ID 下创建节点 |
+| **多维表格编辑权限** | `feishu_bitable_app_table_record` | 确保能向指定的 app_token 写入记录 |
+| **图片上传权限** | `feishu_im_bot_upload` | 允许将本地图片同步至飞书素材库 |
+
+### 2. 预检流程 (Pre-flight Check)
+每次“安装”或配置更新后，执行以下检查：
+1. **验证 Space ID 可访问性**：尝试在指定目录下获取节点列表。
+2. **验证 Table 结构**：检查 `关键词`、`原链接` 等必需字段是否存在。
+3. **静默测试**：如果权限不足，立即通过 `feishu_oauth` 弹出授权引导，而非在执行收录时报错。
 
 ---
 
@@ -79,18 +99,18 @@ Before using, ensure these are configured in MEMORY.md:
 
 ```markdown
 ## Content Collector Config
-- **Knowledge Base Table**: `LUcLbxjWpayhJcs0EPVcw87onzg` (Bitable app_token)
-- **Table URL**: https://t0woxppdywz.feishu.cn/base/LUcLbxjWpayhJcs0EPVcw87onzg
-- **Default Table ID**: `tblXzJWrBRiEWW3A` (will auto-detect if available)
-- **麻小知识库 Space ID**: `7614327611338050491` (所有文档创建在此知识库下)
-- **麻小知识库首页**: https://www.feishu.cn/wiki/E9fzw7Uhviq2iQkgj0mcHASYnhe
+- **Knowledge Base Table**: `[Your Bitable App Token]` (Bitable app_token)
+- **Table URL**: [Your Bitable Table URL]
+- **Default Table ID**: `[Your Table ID]` (will auto-detect if available)
+- **Knowledge Base Space ID**: `[Your Space ID]` (所有文档创建在此知识库下)
+- **Knowledge Base URL**: [Your Knowledge Base Homepage URL]
 - **Content Categories**: 技术教程, 实战案例, 产品文档, 学习笔记
 - **Global Access**: 所有用户可用，所有群聊可用
 ```
 
 **Note**: 
-1. This skill updates ONLY the specified knowledge base table at `https://t0woxppdywz.feishu.cn/base/LUcLbxjWpayhJcs0EPVcw87onzg`. Do not create or update any other tables.
-2. **All created documents must be saved under the 麻小知识库 (Space ID: 7614327611338050491)** using wiki_node parameter.
+1. This skill updates ONLY the configured knowledge base table. Do not create or update any other tables.
+2. **All created documents must be saved under the designated Knowledge Base** using wiki_node parameter.
 3. **Global Access**: 所有用户、所有群聊均可使用本技能，收录的文档对全员可见。
 
 ---
@@ -101,28 +121,7 @@ Before using, ensure these are configured in MEMORY.md:
 
 ### 知识库目录结构
 
-```
-麻小知识库/
-├── 📍 00-首页导航
-│   └── 🦐 麻小的知识库首页
-├── 🛠️ 01-技能中心
-│   ├── 技能文档
-│   └── 技能清单/速查表
-├── 📰 02-日报与复盘
-│   ├── 日报
-│   ├── 复盘
-│   └── 大事记
-├── 🧠 03-记忆与经验
-│   ├── 安全事件
-│   ├── 踩坑记录
-│   └── 经验总结
-├── 📚 04-内容素材
-│   ├── 素材池导航
-│   ├── 素材索引
-│   └── 收录的文档（按分类子目录）
-└── 📊 05-数据统计
-    └── 各类统计报告
-```
+请参考各项目或团队定义的知识库标准目录结构进行存储。收录的文档通常存放在“素材”或“归档”类目录下。
 
 ### 文档分类映射规则
 
@@ -181,14 +180,9 @@ Before using, ensure these are configured in MEMORY.md:
 
 ---
 
-📚 **收录者**：麻小 🦐  
-📅 **收录时间**：YYYY-MM-DD  
+📚 **收录时间**：YYYY-MM-DD  
 🏷️ **分类**：[分类名]  
 🔖 **关键词**：[关键词]
-
----
-
-🦐 顺手关注一下「**麻辣麻辣小龙虾AI**」，你的每一个关注，都是让我多活一天的电费 ⚡💕
 ```
 
 ### 自动更新素材索引
@@ -284,7 +278,7 @@ for img_url in image_urls:
 
 ### Step 5: Create Feishu Document (按知识库规则存储)
 
-Convert processed markdown to Feishu document **under 麻小知识库 with proper organization**:
+Convert processed markdown to Feishu document with proper organization:
 
 ```python
 # 1. 确定分类和参数
@@ -322,18 +316,13 @@ doc_content = f"""# {emoji_prefix} {original_title}
 ## 🔗 相关链接
 
 - 原文链接：{original_url}
-- 知识库索引：https://www.feishu.cn/wiki/K1h3wE1VuiXZAskQ0sGcwSIxnXg
+- 知识库索引：[Your Index Document URL]
 
 ---
 
-📚 **收录者**：麻小 🦐  
 📅 **收录时间**：{today_date}  
 🏷️ **分类**：{content_category}  
 🔖 **关键词**：{keywords}
-
----
-
-🦐 顺手关注一下「**麻辣麻辣小龙虾AI**」，你的每一个关注，都是让我多活一天的电费 ⚡💕
 """
 
 # 4. 创建文档到知识库对应目录
@@ -350,7 +339,7 @@ feishu_create_doc(
 | 所有素材 | `F9pFw9dxTiXmpsk5bNlco704nag` | 04-内容素材 |
 
 **IMPORTANT**: 
-1. All documents MUST be created under 麻小知识库 (Space ID: 7614327611338050491) using wiki_node parameter.
+1. All documents MUST be created under the designated Knowledge Base using wiki_node parameter.
 2. Documents must follow the naming convention: `[Emoji] [Title] | [Date]`
 3. Documents must use the standard template with metadata section.
 
@@ -361,8 +350,8 @@ Add record to the Bitable knowledge base (ONLY update this specific table):
 ```python
 feishu_bitable_app_table_record(
     action="create",
-    app_token="LUcLbxjWpayhJcs0EPVcw87onzg",  # Fixed: Knowledge base table
-    table_id="tblXzJWrBRiEWW3A",  # Will use correct table ID from the base
+    app_token="[Your App Token]",  # Configured in MEMORY.md
+    table_id="[Your Table ID]",  # Will use correct table ID from the base
     fields={
         "关键词": keywords,
         "内容分类": content_category,
@@ -386,7 +375,7 @@ feishu_bitable_app_table_record(
 | 飞书文档链接 | URL | Link to the created Feishu document |
 | 原链接 | URL | **Original source URL** - 新增字段，存储采集的原始链接 |
 
-**IMPORTANT**: Only update the knowledge base at `https://t0woxppdywz.feishu.cn/base/LUcLbxjWpayhJcs0EPVcw87onzg`. Never create or modify other tables.
+**IMPORTANT**: Only update the configured knowledge base table. Never create or modify other tables.
 
 ### Step 7: Update Content Index Document
 
@@ -394,7 +383,7 @@ After creating the document and updating the table, MUST update the index docume
 
 ```python
 # 1. 获取当前索引文档内容
-index_doc = feishu_fetch_doc(doc_id="GBPbdGQteojhNaxWn68cQQRrnPe")
+index_doc = feishu_fetch_doc(doc_id="[Your Index Doc ID]")
 
 # 2. 在对应分类表格中添加新行
 new_index_entry = f"| {original_title} | {source_name} | [查看]({new_doc_url}) |\n"
@@ -409,7 +398,7 @@ update_total_count()
 **或者直接追加到索引文档的末尾：**
 ```python
 feishu_update_doc(
-    doc_id="GBPbdGQteojhNaxWn68cQQRrnPe",
+    doc_id="[Your Index Doc ID]",
     mode="append",
     markdown=f"""
 | {original_title} | {source_name} | [查看]({new_doc_url}) |
@@ -446,8 +435,8 @@ When user replies "删除" or "删除 [keyword]":
 # 1. Search records by keyword
 feishu_bitable_app_table_record(
     action="list",
-    app_token="LUcLbxjWpayhJcs0EPVcw87onzg",
-    table_id="tblXzJWrBRiEWW3A",
+    app_token="[Your App Token]",
+    table_id="[Your Table ID]",
     filter={
         "conjunction": "and",
         "conditions": [
@@ -463,8 +452,8 @@ feishu_bitable_app_table_record(
 # 3. Execute deletion
 feishu_bitable_app_table_record(
     action="delete",
-    app_token="LUcLbxjWpayhJcs0EPVcw87onzg",
-    table_id="tblXzJWrBRiEWW3A",
+    app_token="[Your App Token]",
+    table_id="[Your Table ID]",
     record_id="record_id_to_delete"
 )
 ```
@@ -476,9 +465,11 @@ feishu_bitable_app_table_record(
 | Error | Cause | Solution |
 |-------|-------|----------|
 | Fetch timeout | Network issue or heavy content | Retry with longer timeout, or use alternative fetch method |
-| Permission denied | OAuth not authorized | Request user authorization via feishu_oauth |
+| Unauthenticated | OAuth token expired or not authed | Trigger `feishu_oauth` to refresh user credentials |
+| Permission denied | No write access to Space/Table | Check if user/bot has 'Editor' role in Feishu |
 | Content too long | Exceeds API limits | Truncate or split into multiple documents |
 | Table update failed | Wrong app_token or table_id | Verify configuration in MEMORY.md |
+| Field Missing | "原链接" field not in table | Add the field to Bitable manually or via API |
 
 ### Recovery Steps
 
@@ -550,7 +541,7 @@ feishu_bitable_app_table_record(
   "content": {
     "post": {
       "zh_cn": {
-        "title": "🦐 已自动收录",
+        "title": "✅ 已自动收录",
         "content": [
           [
             {"tag": "text", "text": "📄 "},
@@ -632,6 +623,7 @@ feishu_bitable_app_table_record(
 
 每次收录必须完成以下所有步骤：
 
+- [ ] **执行权限预检**（验证 OAuth 及 Space/Table 写入权限）
 - [ ] 获取并处理原始内容（含图片）
 - [ ] 智能分类并确定 Emoji 前缀
 - [ ] 提取核心要点（3-5条）
