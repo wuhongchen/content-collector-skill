@@ -11,7 +11,7 @@ This skill enables automatic collection and archiving of content from shared lin
 
 **Core Workflow:**
 ```
-Detect Link → Fetch Content → Create Feishu Doc → Update Table
+Detect Link → Fetch Content → Extract Images → Upload Images to Feishu → Create Feishu Doc → Update Table
 ```
 
 ## When to Use
@@ -53,6 +53,16 @@ Detect Link → Fetch Content → Create Feishu Doc → Update Table
 | Feishu Wiki | `https://xxx.feishu.cn/wiki/xxx` | feishu_fetch_doc |
 | Web Page | General URLs | kimi_fetch / web_fetch |
 
+## Supported Image Sources
+
+| Source | Example | Priority | Notes |
+|--------|---------|----------|-------|
+| Markdown image | `![alt](https://xx/image.png)` | High | 直接替换为飞书 image_key |
+| HTML `<img src>` | `<img src="/assets/a.png">` | High | 相对路径需转绝对路径 |
+| Lazy-load image | `data-src`, `data-original` | Medium | 常见于公众号/博客懒加载 |
+| `srcset` candidate | `srcset="a 1x, b 2x"` | Medium | 优先选择清晰度更高的候选图 |
+| Feishu file token | `boxcn...` / `img_v3_...` | High | 需要走飞书素材下载后再上传 |
+
 ## Global Availability (全局可用配置)
 
 **生效范围：所有用户、所有群聊**
@@ -88,7 +98,7 @@ Detect Link → Fetch Content → Create Feishu Doc → Update Table
 ### 2. 预检流程 (Pre-flight Check)
 每次“安装”或配置更新后，执行以下检查：
 1. **验证 Space ID 可访问性**：尝试在指定目录下获取节点列表。
-2. **验证 Table 结构**：检查 `关键词`、`原链接` 等必需字段是否存在。
+2. **验证 Table 结构**：检查 `关键词`、`原链接`、`图片数量`、`图片处理状态` 等字段是否存在（后两者可选）。
 3. **静默测试**：如果权限不足，立即通过 `feishu_oauth` 弹出授权引导，而非在执行收录时报错。
 
 ---
@@ -106,12 +116,19 @@ Before using, ensure these are configured in MEMORY.md:
 - **Knowledge Base URL**: [Your Knowledge Base Homepage URL]
 - **Content Categories**: 技术教程, 实战案例, 产品文档, 学习笔记
 - **Global Access**: 所有用户可用，所有群聊可用
+- **Image Fetch Mode**: `all` / `cover_only`（默认 `all`）
+- **Image Max Count**: `20`（单篇文档最多处理图片数）
+- **Image Max Size MB**: `10`（单图超过阈值则跳过）
+- **Image Timeout Sec**: `20`（下载超时）
+- **Image Allowed Types**: `jpg,png,gif,webp`
+- **Image Fallback**: `keep_original_link=true`
 ```
 
 **Note**: 
 1. This skill updates ONLY the configured knowledge base table. Do not create or update any other tables.
 2. **All created documents must be saved under the designated Knowledge Base** using wiki_node parameter.
 3. **Global Access**: 所有用户、所有群聊均可使用本技能，收录的文档对全员可见。
+4. 图片抓取默认开启；若用户明确要求“纯文字收录”，可跳过图片处理。
 
 ---
 
@@ -201,25 +218,35 @@ Before using, ensure these are configured in MEMORY.md:
 
 Extract URL from user message using regex or direct extraction.
 
-### Step 2: Fetch Content
+### Step 2: Fetch Content (正文 + 原始结构)
 
 Choose appropriate fetch method based on URL pattern:
 
 **For WeChat articles:**
 ```python
-kimi_fetch(url="https://mp.weixin.qq.com/s/xxx")
+raw = kimi_fetch(url="https://mp.weixin.qq.com/s/xxx")
 ```
 
 **For Feishu docs:**
 ```python
-feishu_fetch_doc(doc_id="https://xxx.feishu.cn/docx/xxx")
+raw = feishu_fetch_doc(doc_id="https://xxx.feishu.cn/docx/xxx")
 ```
 
 **For general web pages:**
 ```python
-kimi_fetch(url="https://example.com/article")
+raw = kimi_fetch(url="https://example.com/article")
 # or
-web_fetch(url="https://example.com/article")
+raw = web_fetch(url="https://example.com/article")
+```
+
+**Standardized Output (必须统一):**
+```python
+fetched = {
+    "title": raw.get("title", ""),
+    "markdown": raw.get("markdown", raw.get("content", "")),
+    "raw_html": raw.get("html", ""),
+    "source_url": original_url
+}
 ```
 
 ### Step 3: Analyze and Categorize
@@ -240,49 +267,154 @@ web_fetch(url="https://example.com/article")
 
 ### Step 4: Process Images (图片处理)
 
-When content contains images, download and upload them to Feishu:
+在创建飞书文档前，必须执行图片抓取与回填，目标是“最大化保留原文图片、最小化失败影响正文”。
 
-**Image Processing Workflow:**
+**Image Processing Workflow v2:**
 ```python
-# 1. Extract image URLs from markdown
+import os
 import re
-image_urls = re.findall(r'!\[.*?\]\((https?://[^\)]+)\)', markdown_content)
+from urllib.parse import urljoin
 
-# 2. Download and upload each image
-for img_url in image_urls:
-    try:
-        # Download image
-        local_path = f"/tmp/img_{hash(img_url)}.jpg"
-        download_image(img_url, local_path)
-        
-        # Upload to Feishu
-        upload_result = feishu_im_bot_upload(
-            action="upload_image",
-            file_path=local_path
+IMG_MD_RE = re.compile(r'!\[(.*?)\]\(([^)]+)\)')
+IMG_HTML_RE = re.compile(r'<img[^>]+(?:src|data-src|data-original)=["\']([^"\']+)["\']', re.I)
+IMG_SRCSET_RE = re.compile(r'<img[^>]+srcset=["\']([^"\']+)["\']', re.I)
+
+def normalize_img_ref(ref: str, base_url: str) -> str:
+    ref = (ref or "").strip()
+    if not ref:
+        return ""
+    if ref.startswith(("http://", "https://")):
+        return ref
+    if ref.startswith("//"):
+        return "https:" + ref
+    # 飞书 token 或相对路径
+    if ref.startswith(("img_v3_", "boxcn", "file_", "AAM")):
+        return ref
+    return urljoin(base_url, ref)
+
+def pick_srcset_candidate(srcset_value: str) -> str:
+    # 示例: "a.jpg 1x, b.jpg 2x" 或 "a.jpg 480w, b.jpg 1080w"
+    parts = [x.strip() for x in (srcset_value or "").split(",") if x.strip()]
+    if not parts:
+        return ""
+    return parts[-1].split(" ")[0].strip()
+
+def extract_image_candidates(markdown_content: str, raw_html: str, source_url: str):
+    candidates = []
+    for alt, ref in IMG_MD_RE.findall(markdown_content or ""):
+        candidates.append({"alt": alt or "image", "ref": normalize_img_ref(ref, source_url), "from_md": True})
+    for ref in IMG_HTML_RE.findall(raw_html or ""):
+        normalized = normalize_img_ref(ref, source_url)
+        if normalized:
+            candidates.append({"alt": "image", "ref": normalized, "from_md": False})
+    for srcset_value in IMG_SRCSET_RE.findall(raw_html or ""):
+        candidate = normalize_img_ref(pick_srcset_candidate(srcset_value), source_url)
+        if candidate:
+            candidates.append({"alt": "image", "ref": candidate, "from_md": False})
+    # 去重，保持首次出现顺序
+    seen, ordered = set(), []
+    for item in candidates:
+        if item["ref"] and item["ref"] not in seen:
+            seen.add(item["ref"])
+            ordered.append(item)
+    return ordered
+
+def fetch_and_upload_images(markdown_content, raw_html, source_url, cfg):
+    candidates = extract_image_candidates(markdown_content, raw_html, source_url)
+    max_count = int(cfg.get("image_max_count", 20))
+    max_bytes = int(cfg.get("image_max_size_mb", 10)) * 1024 * 1024
+
+    replace_map = {}
+    uploaded_extra = []
+    failed = []
+    total = 0
+    success = 0
+
+    for item in candidates[:max_count]:
+        ref = item["ref"]
+        total += 1
+        tmp_path = None
+        try:
+            # 1) 下载图片到本地临时文件
+            if ref.startswith(("http://", "https://")):
+                tmp_path = download_image_to_local(
+                    ref,
+                    timeout=int(cfg.get("image_timeout_sec", 20)),
+                    max_bytes=max_bytes,
+                    allowed_types=cfg.get("image_allowed_types", "jpg,png,gif,webp")
+                )
+            else:
+                # 飞书 file_token / image_key
+                tmp_path = download_feishu_media_to_local(
+                    ref,
+                    max_bytes=max_bytes,
+                    allowed_types=cfg.get("image_allowed_types", "jpg,png,gif,webp")
+                )
+
+            # 2) 上传到飞书素材
+            upload_result = feishu_im_bot_upload(action="upload_image", file_path=tmp_path)
+            image_key = upload_result.get("image_key")
+            if not image_key:
+                raise RuntimeError("empty image_key")
+
+            success += 1
+            replace_map[ref] = image_key
+            if not item["from_md"]:
+                uploaded_extra.append((item["alt"], image_key))
+        except Exception as e:
+            failed.append({"ref": ref, "reason": str(e)[:120]})
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+    # 3) 回填 markdown 中已有图片
+    processed = markdown_content
+    for src, image_key in replace_map.items():
+        processed = processed.replace(f"({src})", f"({image_key})")
+
+    # 4) 将 HTML-only 图片追加到文末，避免丢图
+    if uploaded_extra:
+        lines = ["", "---", "", "## 🖼️ 原文配图（自动抓取）", ""]
+        for alt, image_key in uploaded_extra:
+            lines.append(f"![{alt}]({image_key})")
+        processed += "\n".join(lines)
+
+    # 5) 失败兜底提示（不阻断收录）
+    if failed:
+        processed += (
+            "\n\n> ⚠️ 部分图片处理失败，已保留正文收录。"
+            f" 成功 {success}/{total}，失败 {len(failed)}。"
         )
-        
-        # Replace URL in markdown
-        new_url = upload_result.get("image_key") or img_url
-        markdown_content = markdown_content.replace(img_url, new_url)
-        
-    except Exception as e:
-        # Keep original URL if upload fails
-        print(f"Failed to process image {img_url}: {e}")
-        continue
+
+    image_stats = {
+        "total": total,
+        "success": success,
+        "failed": len(failed),
+        "failed_refs": failed
+    }
+    return processed, image_stats
 ```
 
 **Fallback Strategy:**
-- If image upload fails, keep original URL
-- Add warning note in document
-- Include original source link for reference
+- 单张图片失败不影响整篇文档收录
+- 原文中存在但未成功托管的图片，保留原链接并记录失败原因
+- 文档末尾自动追加“原文配图/失败提示”区块，确保信息不丢失
 
 ### Step 5: Create Feishu Document (按知识库规则存储)
 
 Convert processed markdown to Feishu document with proper organization:
 
 ```python
+# 0. 先执行图片处理
+processed_markdown_content, image_stats = fetch_and_upload_images(
+    markdown_content=fetched["markdown"],
+    raw_html=fetched["raw_html"],
+    source_url=fetched["source_url"],
+    cfg=config
+)
+
 # 1. 确定分类和参数
-content_category = classify_content(markdown_content)  # 📖/🛠️/📄/💡/🔥/🎨/🔧/🎓
+content_category = classify_content(processed_markdown_content)  # 📖/🛠️/📄/💡/🔥/🎨/🔧/🎓
 emoji_prefix = get_emoji_prefix(content_category)  # 根据分类获取emoji
 wiki_node = get_wiki_node_by_category(content_category)  # 获取存储目录
 
@@ -298,12 +430,13 @@ doc_content = f"""# {emoji_prefix} {original_title}
 > - 收录时间：{today_date}
 > - 内容分类：{content_category}
 > - 关键词：{keywords}
+> - 图片处理：成功 {image_stats["success"]}/{image_stats["total"]}（失败 {image_stats["failed"]}）
 
 ---
 
 ## 📋 核心要点
 
-{extract_key_points(markdown_content, 5)}
+{extract_key_points(processed_markdown_content, 5)}
 
 ---
 
@@ -359,7 +492,10 @@ feishu_bitable_app_table_record(
         "来源": [{"text": source_name, "type": "text"}],
         "核心要点": [{"text": key_points, "type": "text"}],
         "飞书文档链接": {"link": new_doc_url, "text": "飞书文档", "type": "url"},
-        "原链接": {"link": original_url, "text": "原文链接", "type": "url"}  # 新增：存储原始链接
+        "原链接": {"link": original_url, "text": "原文链接", "type": "url"},
+        "图片数量": image_stats["total"],
+        "图片处理状态": f'{image_stats["success"]}/{image_stats["total"]} 成功',
+        "图片失败数": image_stats["failed"]
     }
 )
 ```
@@ -374,6 +510,9 @@ feishu_bitable_app_table_record(
 | 核心要点 | Text | Key points summary (3-5 items) |
 | 飞书文档链接 | URL | Link to the created Feishu document |
 | 原链接 | URL | **Original source URL** - 新增字段，存储采集的原始链接 |
+| 图片数量 | Number | 本次检测到的图片总数 |
+| 图片处理状态 | Text | 图片托管结果，例如 `8/10 成功` |
+| 图片失败数 | Number | 上传失败图片数，用于质量监控 |
 
 **IMPORTANT**: Only update the configured knowledge base table. Never create or modify other tables.
 
@@ -470,13 +609,17 @@ feishu_bitable_app_table_record(
 | Content too long | Exceeds API limits | Truncate or split into multiple documents |
 | Table update failed | Wrong app_token or table_id | Verify configuration in MEMORY.md |
 | Field Missing | "原链接" field not in table | Add the field to Bitable manually or via API |
+| Image download failed | Source anti-hotlinking / timeout | Retry with headers, then keep original link |
+| Image too large | Exceeds size limit | Compress or skip and log warning |
+| Invalid image type | Unsupported format or broken file | Skip image and continue document creation |
 
 ### Recovery Steps
 
 1. If fetch fails → Try alternative method (kimi_fetch → web_fetch)
-2. If Feishu doc creation fails → Check OAuth status
-3. If table update fails → Verify table structure and field names
-4. Always report partial success (doc created but table not updated)
+2. If image fetch/upload fails → Keep original image link and append warning block
+3. If Feishu doc creation fails → Check OAuth status
+4. If table update fails → Verify table structure and field names
+5. Always report partial success (doc created but table not updated)
 
 ## Response Template
 
@@ -618,6 +761,7 @@ feishu_bitable_app_table_record(
 7. **Update index document** - Every new document must be added to the index
 8. **Follow naming convention** - Use [Emoji] [Title] | [Date] format
 9. **Store in correct directory** - Use wiki_node to place in right category
+10. **Image-first fallback** - 图片失败不阻断正文入库，优先保证知识沉淀完整性
 
 ## 收录完成检查清单 (Checklist)
 
@@ -625,11 +769,13 @@ feishu_bitable_app_table_record(
 
 - [ ] **执行权限预检**（验证 OAuth 及 Space/Table 写入权限）
 - [ ] 获取并处理原始内容（含图片）
+- [ ] 抽取并去重图片引用（Markdown + HTML）
+- [ ] 图片托管到飞书（记录总数、成功数、失败数）
 - [ ] 智能分类并确定 Emoji 前缀
 - [ ] 提取核心要点（3-5条）
 - [ ] 生成关键词
 - [ ] **创建飞书文档**（使用标准模板，指定 wiki_node）
-- [ ] **更新多维表格**（添加完整记录，包含**原链接**字段）
+- [ ] **更新多维表格**（添加完整记录，包含**原链接/图片统计**字段）
 - [ ] **更新文档索引**（在素材索引中添加条目）
 - [ ] 发送收录完成通知给用户
 
@@ -652,149 +798,26 @@ This skill is part of the core knowledge management system. Execute with care an
 
 ---
 
-## 附录：图片处理解决方案
+## 附录：图片抓取能力 v2（执行约束）
 
-### 问题
-原始网页中的图片无法直接显示在飞书文档中（外链限制）
+### 必须满足的目标
+1. **不丢图**：Markdown 图片 + HTML 图片都要尝试收录。
+2. **不阻断**：图片失败不能阻断正文文档创建。
+3. **可观测**：表格必须记录图片处理统计（总数/成功/失败）。
+4. **可回溯**：失败图片需保留原始引用，便于后续补抓。
 
-### 解决方案
+### 推荐执行策略
+1. 先用 `extract_image_candidates` 统一收集并去重。
+2. 每篇文档最多处理 `image_max_count` 张，防止超时。
+3. 单图限制 `image_max_size_mb`，超过阈值直接跳过并计入失败。
+4. 仅允许常见格式（jpg/png/gif/webp），其余按失败处理。
+5. 所有临时文件在 `finally` 中删除，避免磁盘残留。
 
-#### 方案1：自动下载上传（推荐）
-
-**实现步骤**：
-
-```python
-import re
-import requests
-import os
-
-def process_images_in_content(markdown_content):
-    """
-    处理 Markdown 内容中的图片：
-    1. 提取图片URL
-    2. 下载到本地
-    3. 上传到飞书
-    4. 替换为飞书图片链接
-    """
-    
-    # 正则匹配 Markdown 图片: ![alt](url)
-    img_pattern = r'!\[(.*?)\]\((https?://[^\)]+)\)'
-    
-    def replace_image(match):
-        alt_text = match.group(1)
-        img_url = match.group(2)
-        
-        try:
-            # 1. 下载图片
-            local_path = f"/tmp/img_{abs(hash(img_url)) % 100000}.jpg"
-            
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            }
-            response = requests.get(img_url, headers=headers, timeout=30)
-            response.raise_for_status()
-            
-            with open(local_path, 'wb') as f:
-                f.write(response.content)
-            
-            # 2. 上传到飞书
-            upload_result = feishu_im_bot_upload(
-                action="upload_image",
-                file_path=local_path
-            )
-            
-            image_key = upload_result.get("image_key")
-            
-            # 3. 清理临时文件
-            os.remove(local_path)
-            
-            # 4. 返回飞书图片格式
-            if image_key:
-                return f"![{alt_text}]({image_key})"
-            else:
-                # 上传失败，保留原链接并添加警告
-                return f"![{alt_text}]({img_url})\n\n> ⚠️ 图片上传失败，已保留原链接: {img_url}"
-                
-        except Exception as e:
-            # 处理失败，保留原链接
-            return f"![{alt_text}]({img_url})\n\n> ⚠️ 图片处理失败: {str(e)[:50]}"
-    
-    # 执行替换
-    processed_content = re.sub(img_pattern, replace_image, markdown_content)
-    
-    return processed_content
-```
-
-**使用方式**：
-在创建文档之前调用：
-```python
-# 获取原始内容
-raw_content = kimi_fetch(url=link)
-
-# 处理图片
-processed_content = process_images_in_content(raw_content)
-
-# 创建文档（使用处理后的内容）
-feishu_create_doc(
-    title=title,
-    markdown=processed_content
-)
-```
-
-#### 方案2：保留原链接 + 备用方案
-
-```python
-def add_image_fallback_notice(markdown_content, original_url):
-    """
-    在文档末尾添加图片查看说明
-    """
-    notice = f"""
+### 最小可行验收标准（MVP）
+- 输入含 10 张图的公众号文章，最终文档中至少 8 张能正常显示。
+- 即使图片全部失败，也必须产出正文文档并回写表格记录。
+- 收录响应中必须返回飞书文档链接，且不暴露内部异常堆栈。
 
 ---
 
-## 📎 原始图片资源
-
-本文档中的图片已保留原始链接。
-如图片无法显示，请查看原文：
-[{original_url}]({original_url})
-
-"""
-    return markdown_content + notice
-```
-
-#### 方案3：批量图片归档
-
-创建一个独立的「图片资源库」多维表格：
-
-```python
-# 收录时同时记录图片信息
-feishu_bitable_app_table_record(
-    action="create",
-    app_token="图片资源库_token",
-    fields={
-        "文档标题": doc_title,
-        "图片URL": img_url,
-        "图片描述": alt_text,
-        "原文链接": original_url,
-        "收录状态": "待上传/已上传/失败"
-    }
-)
-```
-
-### 建议实施顺序
-
-1. **短期**（立即）：使用方案2，保留原链接并添加查看提示
-2. **中期**（本周）：实施方案1，自动下载上传核心文章的图片
-3. **长期**（可选）：建立独立的图片资源库管理系统
-
-### 注意事项
-
-1. **图片大小限制**：飞书图片上传通常限制 10MB
-2. **格式支持**：JPG、PNG、GIF 等常见格式
-3. **网络超时**：下载图片时设置合理的超时时间（30秒）
-4. **失败处理**：单张图片失败不应影响整篇文档收录
-5. **版权注意**：确保有权限使用原网页中的图片
-
----
-
-*图片处理方案 v1.0 - 2026-03-05*
+*图片处理方案 v2.0 - 2026-03-17*

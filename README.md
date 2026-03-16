@@ -29,9 +29,9 @@ graph TD
     B -- 主动指令 --> C[立即解析]
     B -- 静默检测 --> C
     C --> D[内容抓取/Kimi/Web]
-    D --> E[智能分类与要点提取]
+    D --> E[图片抽取与去重]
     E --> F[图片下载与飞书上传]
-    F --> G[创建飞书文档]
+    F --> G[智能分类与要点提取]
     G --> H[更新多维表格索引]
     H --> I[发送完成通知]
 ```
@@ -51,10 +51,20 @@ graph TD
 - **Knowledge Base Table**: `[你的多维表格 App Token]`
 - **Knowledge Base Space ID**: `[你的知识库节点 ID]`
 - **Content Categories**: 技术教程, 实战案例, 产品文档, 学习笔记...
+- **Image Fetch Mode**: `all` / `cover_only`
+- **Image Max Count**: `20`
+- **Image Max Size MB**: `10`
+- **Image Timeout Sec**: `20`
 ```
 
 ### 3. 权限预检
 在首次运行前，技能会自动执行权限校验，请按照引导完成飞书 OAuth 授权。
+
+### 4. 图片能力说明（v2）
+- 同时抽取 Markdown 与 HTML 的图片引用（含懒加载属性）。
+- 自动将可访问图片下载到本地临时文件并上传到飞书素材库。
+- 文档正文内图片自动替换为飞书 `image_key`，降低外链失效风险。
+- 单张图片失败不会阻断收录，最终文档会保留失败提示与原始来源链接。
 
 ---
 
